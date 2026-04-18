@@ -279,7 +279,7 @@ async function callAI(input: string, candidate: string, score: number, overlap: 
       const aiRes = await fetchWithRetry("/api/verify-match", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input, candidate, ni, nc, score, overlap, authPayload })
+        body: JSON.stringify({ input, candidate, ni, nc, score, overlap })
       });
 
       if (!aiRes.ok) {
@@ -316,7 +316,7 @@ export async function runEngine(
   inputList: string[],
   suppList: string[],
   authPayload: { type: string, value: string } | null,
-  onProgress: (p: number, currentPhase: string) => void
+  onProgress: (p: number, currentPhase: string, latestMatchStr?: string) => void
 ) {
   caches.normCache.clear();
   caches.matchResultCache.clear();

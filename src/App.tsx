@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { parseFile, exportResults } from "./lib/file-utils";
 import { runEngine } from "./lib/engine";
 import { MiniGame } from "./components/MiniGame";
+import { ThreatMatrix } from "./components/ThreatMatrix";
+import { LootChest } from "./components/LootChest";
 import { playBloop, playFight } from "./lib/audio";
 
 export default function App() {
@@ -12,13 +14,10 @@ export default function App() {
   const [results, setResults] = useState<any[]>([]);
   const [errorLog, setErrorLog] = useState("");
   const [showWarning, setShowWarning] = useState<"csv" | "xlsx" | null>(null);
+  const [showLootChest, setShowLootChest] = useState(false);
   
-  // Auth Gates
-  const [authPayload, setAuthPayload] = useState<{ type: string, value: string } | null>(null);
-  const [showAuthGate, setShowAuthGate] = useState(false);
-  const [authInput, setAuthInput] = useState("");
-  const [authMode, setAuthMode] = useState<"password" | "key">("password");
-
+  const [tickerLog, setTickerLog] = useState<string>("SYSTEM IDLE... INSERT COIN");
+  
   const calculateStats = (res: any[]) => {
     let flawless = 0;
     let aiRescues = 0;
@@ -73,12 +72,6 @@ export default function App() {
       return;
     }
     
-    if (!authPayload) {
-       playBloop();
-       setShowAuthGate(true);
-       return;
-    }
-    
     playFight();
     setIsProcessing(true);
     setResults([]);
@@ -86,30 +79,48 @@ export default function App() {
     setProgress({ percent: 0, text: "SPAWNING KOMBATANTS..." });
     
     try {
-      const res = await runEngine(targetList, suppList, authPayload, (percent, text) => {
+      const res = await runEngine(targetList, suppList, null, (percent, text, liveStr) => {
         setProgress({ percent, text });
+        if (liveStr) setTickerLog(liveStr);
       });
       setResults(res);
+      setTickerLog("MATCH COMPLETE! LOOT UNLOCKED! 🏆");
     } catch (err: any) {
       setErrorLog("FATAL K.O.: " + err.message);
+      setTickerLog(`FATAL SYSTEM CRASH: ${err.message}`);
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const handleAuthSubmit = () => {
-     if (!authInput.trim()) return;
-     playBloop();
-     setAuthPayload({ type: authMode, value: authInput.trim() });
-     setShowAuthGate(false);
+  const loadDemoData = () => {
+    playBloop();
+    setTargetList([
+      "Stark Industries",
+      "Wayne Enterprises",
+      "Cyberdyne Systems",
+      "Apex Technology LLC",
+      "Umbrella Corp",
+      "Initech",
+      "Massive Dynamic",
+      "Hooli",
+      "Pied Piper",
+      "Acme Corp"
+    ]);
+    setSuppList([
+      "Stark Int",
+      "Wayne Corp",
+      "Cyberdyne",
+      "Apex IT Solutions",
+      "Umbrella Pharmaceuticals",
+      "Globex Corp",
+      "Oscorp Industries",
+      "Gringotts",
+      "Hooli, Inc",
+      "Pied Piper Compression",
+      "Acme Corporation - US"
+    ]);
   };
-
-  // Whenever authPayload gets set successfully, automatically trigger start!
-  React.useEffect(() => {
-     if (authPayload && !isProcessing && targetList.length > 0 && suppList.length > 0) {
-         handleStart();
-     }
-  }, [authPayload]);
 
   return (
     <div className="relative min-h-screen bg-[#5C94FC] text-black font-pixel p-4 md:p-8 lg:p-12 overflow-x-hidden">
@@ -133,12 +144,16 @@ export default function App() {
           <h1 className="text-3xl md:text-5xl font-pixel-heading text-white retro-shadow mb-6 text-shadow-xl glitch" data-text="S.M.A.S.H. MATCHER" style={{ textShadow: "4px 4px 0 #000" }}>
             S.M.A.S.H.<br className="md:hidden" /> MATCHER
           </h1>
-          <div className="bg-black p-4 retro-border shadow-[4px_4px_0_0_#f8d820] max-w-2xl relative">
+          <div className="bg-black p-4 retro-border shadow-[4px_4px_0_0_#f8d820] max-w-2xl relative mb-4">
             <div className="absolute top-0 left-0 w-full h-full opacity-30" style={{ background: "repeating-linear-gradient(0deg, transparent, transparent 2px, #333 2px, #333 4px)" }}></div>
             <p className="text-white text-[10px] md:text-xs leading-loose relative z-10" style={{ textShadow: "1px 1px 0 #000" }}>
               SELECT YOUR TARGETS, EQUIP THE BOSS LIST, AND LET THE AI CRUSH THE OVERLAP! NO MERCY 🍄
             </p>
           </div>
+          
+          <button onClick={loadDemoData} className="relative z-10 bg-[#e52521] text-white hover:bg-red-600 font-pixel text-[10px] md:text-xs px-6 py-3 retro-border shadow-[4px_4px_0_0_#000] transition-transform active:scale-95 flex items-center gap-2">
+            <span>🎮</span> INSERT DEMO TOKEN
+          </button>
         </header>
 
         {/* Upload Cards */}
@@ -243,20 +258,27 @@ export default function App() {
             {isProcessing ? "BRAWLING..." : "INSERT COIN & FIGHT!"}
           </button>
           
-          <div className="flex-1 w-full relative h-[40px] retro-border bg-black z-10">
+          <div className="flex-1 w-full relative h-[60px] retro-border bg-black z-10 flex flex-col">
             {isProcessing ? (
               <>
                 <div 
-                  className="absolute left-0 top-0 h-full bg-[#00B140] transition-all duration-300"
+                  className="absolute left-0 top-0 h-[30px] bg-[#00B140] transition-all duration-300"
                   style={{ width: `${progress.percent}%` }}
                 />
-                <div className="absolute inset-0 flex items-center justify-between px-4 text-white text-[8px] md:text-[10px]" style={{ textShadow: "2px 2px 0 #000" }}>
+                <div className="absolute top-0 w-full h-[30px] flex items-center justify-between px-4 text-white text-[8px] md:text-[10px]" style={{ textShadow: "2px 2px 0 #000" }}>
                   <span>{progress.text}</span>
                   <span>{progress.percent}%</span>
                 </div>
+                
+                {/* Ticker Box */}
+                <div className="absolute bottom-0 w-full h-[30px] bg-gray-900 border-t-2 border-gray-700 overflow-hidden flex items-center z-20">
+                   <div className="text-[#f8d820] text-[8px] md:text-[10px] font-pixel px-4 ticker whitespace-nowrap">
+                     {tickerLog} &nbsp;&nbsp;&nbsp;&nbsp;+++&nbsp;&nbsp;&nbsp;&nbsp; {tickerLog}
+                   </div>
+                </div>
               </>
             ) : (
-              <div className="absolute inset-0 flex items-center justify-center text-white text-[8px] opacity-50">
+              <div className="absolute inset-0 flex items-center justify-center text-[#f8d820] text-[10px] md:text-[12px] font-pixel-heading animate-pulse">
                 AWAITING KOMBATANTS...
               </div>
             )}
@@ -265,7 +287,7 @@ export default function App() {
 
         {/* Embedded Waiting Minigame! */}
         {isProcessing && (
-          <MiniGame />
+          <MiniGame percent={progress.percent} />
         )}
 
         {/* Results */}
@@ -290,6 +312,9 @@ export default function App() {
                 </div>
               </div>
             </div>
+
+            {/* Visual Threat Matrix Graph */}
+            <ThreatMatrix results={results} />
 
             <div className="p-4 md:p-6 border-b-4 border-black bg-gray-200 flex flex-col md:flex-row items-center justify-between gap-4">
               <h3 className="font-pixel-heading text-lg md:text-xl text-black uppercase" style={{ textShadow: "1px 1px 0 #fff" }}>
@@ -416,8 +441,7 @@ export default function App() {
                 className="flex-1 bg-[#f8d820] text-black py-4 retro-border transition-transform active:translate-y-1 shadow-[4px_4px_0_0_#000] active:shadow-[0_0_0_0_#000] font-bold"
                 onClick={() => { 
                   playFight();
-                  exportResults(results, showWarning); 
-                  setShowWarning(null); 
+                  setShowLootChest(true);
                 }}
               >
                 GIMME THE LOOT!
@@ -427,61 +451,13 @@ export default function App() {
         </div>
       )}
 
-      {/* Auth Gate Modal */}
-      {showAuthGate && (
-        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-          <div className="bg-[#00B140] p-6 max-w-lg w-full retro-border shadow-[12px_12px_0_0_#000] relative">
-            <h2 className="text-white text-2xl font-pixel-heading mb-4 text-shadow-xl" style={{ textShadow: "4px 4px 0px #000" }}>SECURITY GATE</h2>
-            <div className="bg-black p-4 text-white text-[10px] md:text-xs leading-loose retro-border border-white mb-6 text-center">
-              <p className="mb-4 text-[#f8d820]">VERIFY CLEARANCE LEVEL</p>
-              
-              <div className="flex gap-4 justify-center mb-6">
-                 <button 
-                   onClick={() => { playBloop(); setAuthMode("password"); }}
-                   className={`p-2 transition-all border-b-4 ${authMode === "password" ? "text-white border-white" : "text-gray-600 border-transparent hover:text-gray-400"}`}
-                 >
-                   ADMIN PASSWORD
-                 </button>
-                 <button 
-                   onClick={() => { playBloop(); setAuthMode("key"); }}
-                   className={`p-2 transition-all border-b-4 ${authMode === "key" ? "text-white border-white" : "text-gray-600 border-transparent hover:text-gray-400"}`}
-                 >
-                   API KEY
-                 </button>
-              </div>
-
-              <input 
-                 type={authMode === "password" ? "password" : "text"}
-                 className="w-full bg-gray-900 border-4 border-gray-600 text-[#00B140] p-4 font-pixel text-xs text-center outline-none focus:border-white mb-2"
-                 placeholder={authMode === "password" ? "ENTER OVERRIDE CODE" : "ENTER YOUR GEMINI API KEY"}
-                 value={authInput}
-                 onChange={e => setAuthInput(e.target.value)}
-                 onKeyDown={e => e.key === "Enter" && handleAuthSubmit()}
-              />
-              <p className="text-gray-500 text-[8px] mt-2">
-                 {authMode === "key" ? (
-                   <>
-                     Need a key? Get one free at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline">Google AI Studio</a>.
-                   </>
-                 ) : "Using the internal server key limit."}
-              </p>
-            </div>
-            <div className="flex flex-col sm:flex-row gap-4">
-              <button 
-                className="flex-1 bg-white text-black py-4 retro-border transition-transform active:translate-y-1 shadow-[4px_4px_0_0_#000] active:shadow-[0_0_0_0_#000]"
-                onClick={() => { playBloop(); setShowAuthGate(false); setAuthInput(''); }}
-              >
-                ABORT
-              </button>
-              <button 
-                className="flex-1 bg-[#f8d820] text-black py-4 retro-border transition-transform active:translate-y-1 shadow-[4px_4px_0_0_#000] active:shadow-[0_0_0_0_#000] font-bold"
-                onClick={handleAuthSubmit}
-              >
-                AUTHORIZE
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Loot Chest Anim Screen */}
+      {showLootChest && (
+         <LootChest onUnlock={() => {
+            if (showWarning) exportResults(results, showWarning);
+            setShowLootChest(false);
+            setShowWarning(null);
+         }} />
       )}
 
       {/* Credits Footer */}
