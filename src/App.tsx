@@ -1,12 +1,14 @@
 import React, { useState } from "react";
 import { parseFile, exportResults } from "./lib/file-utils";
-import { runEngine } from "./lib/engine";
+import EngineWorker from "./lib/engine.worker?worker";
+import { saveSession, loadSession, clearSession } from "./lib/session";
 import { MiniGame } from "./components/MiniGame";
-import { ThreatMatrix } from "./components/ThreatMatrix";
 import { LootChest } from "./components/LootChest";
-import { playBloop, playFight } from "./lib/audio";
+import { playBloop, playFight, setMuted } from "./lib/audio";
+import { motion } from "motion/react";
 
 export default function App() {
+  const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [targetList, setTargetList] = useState<string[]>([]);
   const [suppList, setSuppList] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -18,6 +20,32 @@ export default function App() {
   
   const [tickerLog, setTickerLog] = useState<string>("SYSTEM IDLE... INSERT COIN");
   
+  // Auth Gates
+  const [authPayload, setAuthPayload] = useState<{ type: string, value: string } | null>(null);
+  const [showAuthGate, setShowAuthGate] = useState(false);
+  const [authInput, setAuthInput] = useState("");
+  const [authMode, setAuthMode] = useState<"password" | "key">("key");
+  const [workerRef, setWorkerRef] = useState<Worker | null>(null);
+  
+  // Tokens 
+  const MAX_ADMIN_TOKENS = 50;
+  const [tokensUsed, setTokensUsed] = useState(0);
+
+  React.useEffect(() => {
+    // Check for cached session on mount
+    loadSession('activeSession').then(data => {
+       if (data && data.targetList?.length > 0) {
+          if (window.confirm("Found an interrupted session in cache! Resume?")) {
+              setTargetList(data.targetList);
+              setSuppList(data.suppList);
+              // We won't automatically run, but the files are loaded.
+          } else {
+              clearSession();
+          }
+       }
+    }).catch(console.error);
+  }, []);
+
   const calculateStats = (res: any[]) => {
     let flawless = 0;
     let aiRescues = 0;
@@ -47,6 +75,7 @@ export default function App() {
         setErrorLog("");
         const names = await parseFile(e.target.files[0]);
         setTargetList(names);
+        saveSession('activeSession', { targetList: names, suppList });
       } catch (err: any) {
         setErrorLog(err.message);
       }
@@ -60,6 +89,7 @@ export default function App() {
         setErrorLog("");
         const names = await parseFile(e.target.files[0]);
         setSuppList(names);
+        saveSession('activeSession', { targetList, suppList: names });
       } catch (err: any) {
         setErrorLog(err.message);
       }
@@ -72,60 +102,133 @@ export default function App() {
       return;
     }
     
+    if (!authPayload) {
+       playBloop();
+       setShowAuthGate(true);
+       return;
+    }
+    
     playFight();
     setIsProcessing(true);
     setResults([]);
     setErrorLog("");
     setProgress({ percent: 0, text: "SPAWNING KOMBATANTS..." });
+    setTokensUsed(0);
     
-    try {
-      const res = await runEngine(targetList, suppList, null, (percent, text, liveStr) => {
-        setProgress({ percent, text });
-        if (liveStr) setTickerLog(liveStr);
-      });
-      setResults(res);
-      setTickerLog("MATCH COMPLETE! LOOT UNLOCKED! 🏆");
-    } catch (err: any) {
-      setErrorLog("FATAL K.O.: " + err.message);
-      setTickerLog(`FATAL SYSTEM CRASH: ${err.message}`);
-    } finally {
-      setIsProcessing(false);
-    }
+    if (workerRef) workerRef.terminate();
+    
+    const worker = new EngineWorker();
+    setWorkerRef(worker);
+
+    worker.postMessage({ type: 'run', payload: { inputList: targetList, suppList, authPayload } });
+
+    worker.onmessage = (e) => {
+      const data = e.data;
+      if (data.type === 'progress') {
+        setProgress({ percent: data.percent, text: data.text });
+        if (data.liveStr) setTickerLog(data.liveStr);
+        if (data.tokenConsumed) setTokensUsed(prev => prev + 1);
+      } else if (data.type === 'done') {
+        setResults(data.results);
+        setTickerLog("MATCH COMPLETE! LOOT UNLOCKED! 🏆");
+        setIsProcessing(false);
+        setWorkerRef(null);
+        clearSession(); // Clean up successfully completed sessions
+      } else if (data.type === 'error') {
+        setErrorLog("FATAL K.O.: " + data.error);
+        setTickerLog(`FATAL SYSTEM CRASH: ${data.error}`);
+        setIsProcessing(false);
+        setWorkerRef(null);
+      }
+    };
   };
 
-  const loadDemoData = () => {
-    playBloop();
-    setTargetList([
-      "Stark Industries",
-      "Wayne Enterprises",
-      "Cyberdyne Systems",
-      "Apex Technology LLC",
-      "Umbrella Corp",
-      "Initech",
-      "Massive Dynamic",
-      "Hooli",
-      "Pied Piper",
-      "Acme Corp"
-    ]);
-    setSuppList([
-      "Stark Int",
-      "Wayne Corp",
-      "Cyberdyne",
-      "Apex IT Solutions",
-      "Umbrella Pharmaceuticals",
-      "Globex Corp",
-      "Oscorp Industries",
-      "Gringotts",
-      "Hooli, Inc",
-      "Pied Piper Compression",
-      "Acme Corporation - US"
-    ]);
+  const handleAuthSubmit = () => {
+     if (!authInput.trim()) return;
+     playBloop();
+     setAuthPayload({ type: authMode, value: authInput.trim() });
+     setShowAuthGate(false);
   };
+
+  React.useEffect(() => {
+     if (authPayload && !isProcessing && targetList.length > 0 && suppList.length > 0) {
+         if (!results.length && progress.percent === 0) {
+           handleStart();
+         }
+     }
+  }, [authPayload, targetList.length, suppList.length]);
 
   return (
-    <div className="relative min-h-screen bg-[#5C94FC] text-black font-pixel p-4 md:p-8 lg:p-12 overflow-x-hidden">
+    <div className="relative min-h-screen bg-[#5C94FC] text-black font-pixel p-4 md:p-8 lg:p-12 overflow-x-hidden pt-16">
+      
+      {/* Top Token Bar (ALWAYS VISIBLE NOW) */}
+      <div className="fixed top-0 left-0 w-full bg-black border-b-4 border-gray-600 z-50 flex items-center justify-between px-4 py-2 text-white font-pixel text-[8px] md:text-xs shadow-[0_4px_0_0_#000]">
+         <div className="flex items-center gap-2">
+           {authPayload ? (
+             <>
+               <span className="animate-pulse">🟢</span>
+               <span className="hidden sm:inline">
+                 {authPayload.type === "password" ? "ADMIN BYPASS MODE" : "CUSTOM API KEY ACTIVE"}
+               </span>
+               <span className="sm:hidden">
+                 {authPayload.type === "password" ? "ADMIN" : "API KEY"}
+               </span>
+             </>
+           ) : (
+             <>
+               <span className="animate-pulse text-[#e52521]">🔴</span>
+               <span>SYSTEM STANDBY</span>
+             </>
+           )}
+         </div>
+         
+         <div className="flex items-center gap-2 md:gap-4">
+            <button 
+               onClick={() => {
+                 const m = !isAudioMuted;
+                 setIsAudioMuted(m);
+                 setMuted(m);
+                 if(!m) playBloop();
+               }}
+               className="hover:scale-105 transition-transform bg-gray-800 border border-gray-600 px-2 py-1 flex gap-2 items-center focus:outline-none"
+               title="Boss Key"
+            >
+               {isAudioMuted ? "🔇 MUTE ON" : "🔊 MUTE OFF"}
+            </button>
+
+            {authPayload && (
+              <>
+                <span className="hidden sm:inline">TOKENS:</span>
+                {authPayload.type === "password" ? (
+                  <>
+                    <div className="w-16 md:w-32 lg:w-48 h-4 bg-gray-800 border-2 border-white relative">
+                       <div 
+                         className="absolute top-0 left-0 h-full transition-all duration-300"
+                         style={{ 
+                           width: `${Math.min(100, Math.max(0, 100 - (tokensUsed / MAX_ADMIN_TOKENS) * 100))}%`,
+                           backgroundColor: tokensUsed > MAX_ADMIN_TOKENS ? "#e52521" : "#00B140"
+                         }}
+                       ></div>
+                    </div>
+                    <span>{Math.max(0, MAX_ADMIN_TOKENS - tokensUsed)}/{MAX_ADMIN_TOKENS}</span>
+                  </>
+                ) : (
+                   <span className="text-[#00B140] tracking-widest font-bold">UNLIMITED</span>
+                )}
+              </>
+            )}
+         </div>
+      </div>
+
       <div className="crt-overlay"></div>
-      <div className="max-w-7xl mx-auto space-y-10 relative z-10">
+      
+      {/* Animated Main Container */}
+      <motion.div 
+        initial={{ opacity: 0, y: 30 }} 
+        animate={{ opacity: 1, y: 0 }} 
+        transition={{ duration: 0.6, ease: "easeOut" }}
+        className="max-w-7xl mx-auto space-y-10 relative z-10"
+      >
         
         {/* Error Display */}
         {errorLog && (
@@ -150,10 +253,6 @@ export default function App() {
               SELECT YOUR TARGETS, EQUIP THE BOSS LIST, AND LET THE AI CRUSH THE OVERLAP! NO MERCY 🍄
             </p>
           </div>
-          
-          <button onClick={loadDemoData} className="relative z-10 bg-[#e52521] text-white hover:bg-red-600 font-pixel text-[10px] md:text-xs px-6 py-3 retro-border shadow-[4px_4px_0_0_#000] transition-transform active:scale-95 flex items-center gap-2">
-            <span>🎮</span> INSERT DEMO TOKEN
-          </button>
         </header>
 
         {/* Upload Cards */}
@@ -313,9 +412,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Visual Threat Matrix Graph */}
-            <ThreatMatrix results={results} />
-
             <div className="p-4 md:p-6 border-b-4 border-black bg-gray-200 flex flex-col md:flex-row items-center justify-between gap-4">
               <h3 className="font-pixel-heading text-lg md:text-xl text-black uppercase" style={{ textShadow: "1px 1px 0 #fff" }}>
                 BATTLE RESULTS
@@ -415,7 +511,7 @@ export default function App() {
             </div>
           </div>
         )}
-      </div>
+      </motion.div>
 
       {/* Download Warning Modal */}
       {showWarning && (
@@ -458,6 +554,63 @@ export default function App() {
             setShowLootChest(false);
             setShowWarning(null);
          }} />
+      )}
+
+      {/* Auth Gate Modal */}
+      {showAuthGate && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+          <div className="bg-[#00B140] p-6 max-w-lg w-full retro-border shadow-[12px_12px_0_0_#000] relative">
+            <h2 className="text-white text-2xl font-pixel-heading mb-4 text-shadow-xl" style={{ textShadow: "4px 4px 0px #000" }}>SECURITY GATE</h2>
+            <div className="bg-black p-4 text-white text-[10px] md:text-xs leading-loose retro-border border-white mb-6 text-center">
+              <p className="mb-4 text-[#f8d820]">VERIFY CLEARANCE LEVEL</p>
+              
+              <div className="flex flex-col md:flex-row gap-4 justify-center mb-6">
+                 <button 
+                   onClick={() => { playBloop(); setAuthMode("key"); }}
+                   className={`p-2 transition-all border-b-4 ${authMode === "key" ? "text-white border-white" : "text-gray-600 border-transparent hover:text-gray-400"}`}
+                 >
+                   CUSTOM API KEY
+                 </button>
+                 <button 
+                   onClick={() => { playBloop(); setAuthMode("password"); }}
+                   className={`p-2 transition-all border-b-4 ${authMode === "password" ? "text-white border-white" : "text-gray-600 border-transparent hover:text-gray-400"}`}
+                 >
+                   ADMIN PASSWORD
+                 </button>
+              </div>
+
+              <input 
+                 type={authMode === "password" ? "password" : "text"}
+                 className="w-full bg-gray-900 border-4 border-gray-600 text-[#00B140] p-4 font-pixel text-xs text-center outline-none focus:border-white mb-2"
+                 placeholder={authMode === "password" ? "ENTER OVERRIDE CODE" : "ENTER YOUR GEMINI API KEY"}
+                 value={authInput}
+                 onChange={e => setAuthInput(e.target.value)}
+                 onKeyDown={e => e.key === "Enter" && handleAuthSubmit()}
+              />
+              <p className="text-gray-500 text-[8px] mt-2">
+                 {authMode === "key" ? (
+                   <>
+                     Need a key? Get one free at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline">Google AI Studio</a>.
+                   </>
+                 ) : "Note: Admin override limits API quota and removes Search Grounding."}
+              </p>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-4">
+              <button 
+                className="flex-1 bg-white text-black py-4 retro-border transition-transform active:translate-y-1 shadow-[4px_4px_0_0_#000] active:shadow-[0_0_0_0_#000]"
+                onClick={() => { playBloop(); setShowAuthGate(false); setAuthInput(''); }}
+              >
+                ABORT
+              </button>
+              <button 
+                className="flex-1 bg-[#f8d820] text-black py-4 retro-border transition-transform active:translate-y-1 shadow-[4px_4px_0_0_#000] active:shadow-[0_0_0_0_#000] font-bold"
+                onClick={handleAuthSubmit}
+              >
+                AUTHORIZE
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Credits Footer */}

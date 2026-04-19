@@ -279,7 +279,7 @@ async function callAI(input: string, candidate: string, score: number, overlap: 
       const aiRes = await fetchWithRetry("/api/verify-match", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input, candidate, ni, nc, score, overlap })
+        body: JSON.stringify({ input, candidate, ni, nc, score, overlap, authPayload })
       });
 
       if (!aiRes.ok) {
@@ -316,7 +316,7 @@ export async function runEngine(
   inputList: string[],
   suppList: string[],
   authPayload: { type: string, value: string } | null,
-  onProgress: (p: number, currentPhase: string, latestMatchStr?: string) => void
+  onProgress: (p: number, currentPhase: string, latestMatchStr?: string, tokenConsumed?: boolean) => void
 ) {
   caches.normCache.clear();
   caches.matchResultCache.clear();
@@ -434,6 +434,8 @@ export async function runEngine(
         }
 
         if (allowed) {
+          const isCached = caches.aiCache.has(pairKey);
+          if (!isCached) onProgress(-1, "", undefined, true); // Dispatch token consumed
           const raw = await callAI(input, candidate, score, overlap, authPayload);
           const validated = validateAIResult(raw, score, overlap);
           matches.push({ candidate, score: +score.toFixed(4), overlap: +overlap.toFixed(3), ...validated });

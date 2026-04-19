@@ -97,39 +97,6 @@
     100% { transform: translateX(-100%); }
   }
 
-  /* Radar Elements for Threat Matrix */
-  .radar-bg {
-    background: radial-gradient(circle at center, #001100 0%, #000000 100%);
-  }
-
-  .radar-grid {
-    background-image: 
-      linear-gradient(#002200 1px, transparent 1px),
-      linear-gradient(90deg, #002200 1px, transparent 1px);
-    background-size: 40px 40px;
-    background-position: center center;
-    border-radius: 50%;
-  }
-
-  .radar-sweep {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 200%;
-    height: 3px;
-    background: linear-gradient(90deg, rgba(0, 255, 65, 0), rgba(0, 255, 65, 0.8));
-    transform-origin: 0% 0%;
-    animation: sweep 4s linear infinite;
-    box-shadow: 0 -10px 40px 2px rgba(0, 255, 65, 0.4);
-    z-index: 5;
-    pointer-events: none;
-  }
-
-  @keyframes sweep {
-    0% { transform: rotate(0deg) translate(0%, -50%); }
-    100% { transform: rotate(360deg) translate(0%, -50%); }
-  }
-
   /* Loot Drop Animations */
   .animate-loot-drop {
     animation: loot-drop-anim 0.8s cubic-bezier(0.25, 1, 0.5, 1) forwards;

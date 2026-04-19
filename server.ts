@@ -12,10 +12,22 @@ async function startServer() {
   // API Route for AI Verification
   app.post("/api/verify-match", async (req, res) => {
     try {
-      const { input, candidate, ni, nc, score, overlap } = req.body;
+      const { input, candidate, ni, nc, score, overlap, authPayload } = req.body;
 
-      if (!process.env.GEMINI_API_KEY) throw new Error("Server missing default API key.");
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      let ai: GoogleGenAI;
+      let toolsConfig: any[] | undefined = undefined;
+
+      if (authPayload?.type === "password" && authPayload?.value === "@$#Pja123") {
+        if (!process.env.GEMINI_API_KEY) throw new Error("Server missing default env API key.");
+        ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        // The default server key does not support Google Search
+        toolsConfig = undefined;
+      } else if (authPayload?.type === "key" && authPayload?.value) {
+        ai = new GoogleGenAI({ apiKey: authPayload.value });
+        toolsConfig = [{ googleSearch: {} }];
+      } else {
+        return res.status(401).json({ error: "Unauthorized. Invalid Password or missing API Key." });
+      }
 
       const userPrompt = `Fighter A: "${input}" (Normalized: "${ni}")
 Fighter B: "${candidate}" (Normalized: "${nc}")
@@ -42,7 +54,7 @@ Rules:
         config: {
           systemInstruction: systemInstruction,
           temperature: 0.2,
-          tools: [{ googleSearch: {} }],
+          tools: toolsConfig,
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,

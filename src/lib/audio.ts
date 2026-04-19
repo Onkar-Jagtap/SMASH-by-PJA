@@ -2,6 +2,13 @@
 
 const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
 let audioCtx: AudioContext | null = null;
+let isMuted = false;
+
+export const setMuted = (muted: boolean) => {
+  isMuted = muted;
+};
+
+export const getMuted = () => isMuted;
 
 const getCtx = () => {
   if (!audioCtx) audioCtx = new AudioContextClass();
@@ -10,6 +17,7 @@ const getCtx = () => {
 };
 
 export const playBloop = () => {
+  if (isMuted) return;
   const ctx = getCtx();
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
@@ -25,6 +33,7 @@ export const playBloop = () => {
 };
 
 export const playPow = () => {
+  if (isMuted) return;
   const ctx = getCtx();
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
@@ -40,6 +49,7 @@ export const playPow = () => {
 };
 
 export const playFight = () => {
+  if (isMuted) return;
   const ctx = getCtx();
   // Deep alarm klaxon
   [300, 310].forEach(freq => {
@@ -58,6 +68,7 @@ export const playFight = () => {
 };
 
 export const playThud = () => {
+  if (isMuted) return;
   const ctx = getCtx();
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
@@ -73,6 +84,7 @@ export const playThud = () => {
 };
 
 export const playUnlock = () => {
+  if (isMuted) return;
   const ctx = getCtx();
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
@@ -88,6 +100,7 @@ export const playUnlock = () => {
 };
 
 export const playFanfare = () => {
+  if (isMuted) return;
   const ctx = getCtx();
   const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
   let time = ctx.currentTime;
