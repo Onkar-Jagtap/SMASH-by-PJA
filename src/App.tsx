@@ -591,7 +591,7 @@ export default function App() {
                    <>
                      Need a key? Get one free at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline">Google AI Studio</a>.
                    </>
-                 ) : "Note: Admin override limits API quota and removes Search Grounding."}
+                 ) : "Note: Admin override uses the secure server-side master key and includes full Search Grounding."}
               </p>
             </div>
             <div className="flex flex-col sm:flex-row gap-4">

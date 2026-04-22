@@ -2,7 +2,7 @@
 // CMIP MATCHING ENGINE
 // ==============================================================================
 
-const CHUNK_SIZE = 100; // UI chunking
+const CHUNK_SIZE = 50; // Reduced for slower, more stable processing
 const MIN_SCORE = 0.35;
 const MAX_MATCHES = 5;
 const AI_BUDGET_PCT = 1.0;
@@ -11,6 +11,13 @@ const AI_MIN_SCORE = 0.65;
 const AI_MIN_OVERLAP = 0.50;
 
 const LEGAL_SUFFIX_RE = /\b(ltd|limited|pvt|private|inc|llc|corp|corporation|plc|co|company|sa|s\.a|s\/a|ltda|s\.a\.|eireli|me|epp|mei)\b\.?/gi;
+const CAMEL_SPLIT_1 = /([a-z])([A-Z])/g;
+const CAMEL_SPLIT_2 = /([A-Z]+)([A-Z][a-z])/g;
+const FEFF_RE = /^\uFEFF/;
+const AMP_RE = /[&]/g;
+const NON_ALPHANUM_RE = /[^\w\s]/g;
+const WHITESPACE_RE = /\s+/g;
+const ACCENT_RE = /[\u0300-\u036f]/g;
 
 const WEAK_TOKENS = new Set([
   "and", "the", "of", "in", "at", "for", "to", "a", "an", "is", "by", "or", "on", "as",
@@ -37,6 +44,8 @@ const ABBREV_MAP: Record<string, string> = {
   "lt": "larsen toubro", "bpcl": "bharat petroleum corporation",
   "hpcl": "hindustan petroleum corporation", "ongc": "oil natural gas corporation",
   "ntpc": "national thermal power corporation", "coal": "coal india",
+  "itau": "itau unibanco", "bradesco": "banco bradesco", "bb": "banco brasil",
+  "btg": "btg pactual", "xp": "xp investimentos",
   "s.a.": " ", "sa": " ", "ltda": " ", "eireli": " ", "mei": " ", "me": " ", "epp": " ", "s/a": " "
 };
 
@@ -82,7 +91,7 @@ const CONGLOMERATE_MAP: Record<string, string | null> = {
 // Caches
 export const caches = { normCache: new Map(), matchResultCache: new Map(), aiCache: new Map() };
 
-const GENERIC_TOKENS = new Set([
+const GENERIC_TOKENS: Set<string> = new Set([
   "technologies", "tech", "technology", "info", "information", "solutions", "group", "holdings", "systems",
   "services", "enterprises", "international", "industries", "consulting",
   "management", "partners", "ventures", "capital", "network", "networks",
@@ -98,21 +107,21 @@ function normalizeName(raw: string) {
   const key = raw;
   if (caches.normCache.has(key)) return caches.normCache.get(key);
 
-  let n = raw.normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Strip accents FIRST
-  n = n.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2"); // Split camelCase
+  let n = raw.normalize("NFD").replace(ACCENT_RE, ""); // Strip accents FIRST
+  n = n.replace(CAMEL_SPLIT_1, "$1 $2").replace(CAMEL_SPLIT_2, "$1 $2"); // Split camelCase
   n = n.toLowerCase().trim();
-  n = n.replace(/^\uFEFF/, "");
-  n = n.replace(/[&]/g, " and ");
-  n = n.replace(/[^\w\s]/g, " ");
+  n = n.replace(FEFF_RE, "");
+  n = n.replace(AMP_RE, " and ");
+  n = n.replace(NON_ALPHANUM_RE, " ");
   n = n.replace(LEGAL_SUFFIX_RE, " ");
-  n = n.replace(/\s+/g, " ").trim();
+  n = n.replace(WHITESPACE_RE, " ").trim();
   n = n.split(" ").map(t => ABBREV_MAP[t] || (t === "it" ? "information technology" : t)).join(" ");
-  n = n.replace(/\s+/g, " ").trim();
+  n = n.replace(WHITESPACE_RE, " ").trim();
   caches.normCache.set(key, n);
   return n;
 }
 
-function tokenize(name: string) {
+function tokenize(name: string): string[] {
   return normalizeName(name)
     .split(" ")
     .map(t => t.trim())
@@ -188,8 +197,8 @@ function applyDeterministicRules(input: string, candidate: string) {
   // Example: "Grupo A" vs "Grupo IN" -> only share "Grupo", which is generic -> KILL.
   // Example: "A+ Tecnologia" vs "Luby Tecnologia" -> only share "Tecnologia", which is generic -> KILL.
   // Exception: if both strings ONLY consist of generic tokens, don't apply this block as they might actually be a match
-  const taSet = new Set(tokenize(input));
-  const tbSet = new Set(tokenize(candidate));
+  const taSet = new Set<string>(tokenize(input));
+  const tbSet = new Set<string>(tokenize(candidate));
   const sharedTokens = [...taSet].filter(t => tbSet.has(t));
   const hasStrongSharedTokens = sharedTokens.some(t => !GENERIC_TOKENS.has(t));
   
@@ -229,6 +238,19 @@ function applyDeterministicRules(input: string, candidate: string) {
   if (groupA && groupB && groupA === groupB) {
     return { relation: "same_group", confidence: "high", source: "conglomerate_match", verdict_log: "BLOODLINE DETECTED! SAME CONGLOMERATE CLAN!" };
   }
+
+  // New: High-Confidence Substring Match (prevents Gemini calls for obvious subs)
+  // Example: "Apple India" vs "Apple"
+  if (ni && nc && (ni.startsWith(nc + " ") || nc.startsWith(ni + " ") || ni.endsWith(" " + nc) || nc.endsWith(" " + ni))) {
+     const longerTokens = ni.length > nc.length ? taSet : tbSet;
+     const shorterTokens = ni.length > nc.length ? tbSet : taSet;
+     // If the longer name only adds generic tokens (like "India", "Group", "Solutions")
+     const diffTokens = [...longerTokens].filter(t => !shorterTokens.has(t));
+     if (diffTokens.every(t => GENERIC_TOKENS.has(t) || WEAK_TOKENS.has(t))) {
+        return { relation: "same_company", confidence: "high", source: "substring_t1", verdict_log: "OBVIOUS SUBSIDIARY! SUBSTRING MATCH ON COLD START!" };
+     }
+  }
+
   return null;
 }
 
@@ -261,25 +283,31 @@ function applyClassificationRules(score: number, overlap: number, isSubset: bool
 
 const AI_FALLBACK = { relation: "different", confidence: "low", source: "ai_fallback", verdict_log: "ERROR! AI ABORTED THE MATCH! SAFETY DEFAULT!" };
 
-async function fetchWithRetry(url: string, options: RequestInit, maxRetries = 6) {
+async function fetchWithRetry(url: string, options: RequestInit, maxRetries = 8, onRetry?: (delay: number, attempt: number, status: number) => void) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const res = await fetch(url, options);
       if (res.ok) return res;
       if (res.status === 429 || res.status >= 500) {
-        // Enterprise backoff: 2s, 4s, 8s, 16s, 32s (very safe for Rate Limits)
-        const delay = Math.pow(2, attempt) * 2000;
-        console.warn(`[API] Rate limit or server error (HTTP ${res.status}). Retrying in ${delay / 1000}s...`);
+        // Enterprise backoff with Jitter: prevents multiple simultaneous retries from clashing
+        const jitter = Math.random() * 1000;
+        const delay = (Math.pow(2, attempt) * 2000) + jitter;
+        
+        if (onRetry) onRetry(delay, attempt + 1, res.status);
+        console.warn(`[ENTERPRISE ENGINE] HTTP ${res.status} detected. Backing off ${delay / 1000}s (Attempt ${attempt + 1}/${maxRetries})...`);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
       return res;
     } catch (err) {
       if (attempt === maxRetries - 1) throw err;
-      await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 2000));
+      const jitter = Math.random() * 1000;
+      const delay = (Math.pow(2, attempt) * 2000) + jitter;
+      if (onRetry) onRetry(delay, attempt + 1, 0);
+      await new Promise(r => setTimeout(r, delay));
     }
   }
-  throw new Error("Max retries exceeded");
+  throw new Error("PROBABILITY OF SUCCESS DEPLETED: MAX RETRIES EXCEEDED");
 }
 
 function makeSemaphore(limit: number) {
@@ -298,10 +326,17 @@ function makeSemaphore(limit: number) {
   };
 }
 
-// Enterprise Concurrency (Low and steady to never trigger 429 API blocks)
-const aiSemaphore = makeSemaphore(3);
+// Enterprise Concurrency (Set to 1 for maximum stability on Free Tier)
+const aiSemaphore = makeSemaphore(1);
 
-async function callAI(input: string, candidate: string, score: number, overlap: number, authPayload: { type: string, value: string } | null) {
+async function callAI(
+  input: string, 
+  candidate: string, 
+  score: number, 
+  overlap: number, 
+  authPayload: { type: string, value: string } | null,
+  onRateLimit?: (msg: string) => void
+) {
   const ni = normalizeName(input);
   const nc = normalizeName(candidate);
   const key = `${ni}||${nc}`;
@@ -316,6 +351,8 @@ async function callAI(input: string, candidate: string, score: number, overlap: 
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ input, candidate, ni, nc, score, overlap, authPayload })
+      }, 8, (delay, attempt) => {
+        if (onRateLimit) onRateLimit(`RATE LIMIT DETECTED! BACKING OFF ${Math.round(delay/1000)}s... (TRY ${attempt}/8)`);
       });
 
       if (!aiRes.ok) {
@@ -379,24 +416,31 @@ export async function runEngine(
   const processInp = dedupedInp;
   const total = processInp.length;
   
-  onProgress(5, "Building Suppression Index...");
+  onProgress(5, "Building Suppression Index (75k cap)...");
   await delayFrame();
 
   const suppIndex = new Map<string, Set<string>>();
   const exactNormSupp = new Map<string, string>();
 
-  for (const c of suppList) {
-    const ni = normalizeName(c);
-    if (!exactNormSupp.has(ni)) exactNormSupp.set(ni, c);
+  // Chunk index building to prevent long-tasks in worker
+  for (let i = 0; i < suppList.length; i += 5000) {
+    const chunk = suppList.slice(i, i + 5000);
+    for (const c of chunk) {
+      const ni = normalizeName(c);
+      if (!exactNormSupp.has(ni)) exactNormSupp.set(ni, c);
 
-    const toks = tokenize(c).filter(t => !WEAK_TOKENS.has(t));
-    const strongToks = toks.filter(t => !GENERIC_TOKENS.has(t));
-    const indexToks = strongToks.length > 0 ? strongToks : toks;
+      const toks = tokenize(c).filter(t => !WEAK_TOKENS.has(t));
+      const strongToks = toks.filter(t => !GENERIC_TOKENS.has(t));
+      const indexToks = strongToks.length > 0 ? strongToks : toks;
 
-    for (const t of indexToks) {
-      if (!suppIndex.has(t)) suppIndex.set(t, new Set());
-      suppIndex.get(t)!.add(c);
+      for (const t of indexToks) {
+        if (!suppIndex.has(t)) suppIndex.set(t, new Set());
+        suppIndex.get(t)!.add(c);
+      }
     }
+    const idxPct = 5 + Math.floor((i / suppList.length) * 5);
+    onProgress(idxPct, `Indexing candidates (${i}/${suppList.length})...`);
+    await delayFrame();
   }
 
   const quota = {
@@ -495,7 +539,11 @@ export async function runEngine(
         if (allowed) {
           const isCached = caches.aiCache.has(pairKey);
           if (!isCached) onProgress(-1, "", undefined, true); // Dispatch token consumed
-          const raw = await callAI(input, candidate, score, overlap, authPayload);
+          const raw = await callAI(input, candidate, score, overlap, authPayload, (msg) => {
+             onProgress(-1, msg); // Use -1 to not affect percent but update text
+          });
+          // Optimized "Safe Speed" Pause (targeting ~13-14 RPM assuming processing time)
+          await new Promise(resolve => setTimeout(resolve, 2500)); 
           const validated = validateAIResult(raw, score, overlap, isSubset);
           matches.push({ candidate, score: +score.toFixed(4), overlap: +overlap.toFixed(3), ...validated });
         } else {
@@ -521,5 +569,5 @@ export async function runEngine(
 }
 
 function delayFrame() {
-  return new Promise(resolve => setTimeout(resolve, 50));
+  return new Promise(resolve => setTimeout(resolve, 150));
 }

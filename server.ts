@@ -56,38 +56,58 @@ Rules:
 - Shared industry words are NOT evidence.
 - Your 'verdict_log' must be a savage, 1-short-sentence arcade game announcer shout explaining your reason, including confirming if Search proved it!`;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: userPrompt,
-        config: {
-          systemInstruction: systemInstruction,
-          temperature: 0.2,
-          tools: toolsConfig,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              relation: {
-                type: Type.STRING,
-                enum: ["same_company", "same_group", "different"],
-                description: "The relationship between the two companies."
-              },
-              confidence: {
-                type: Type.STRING,
-                enum: ["high", "medium", "low"],
-                description: "Your confidence in the relationship."
-              },
-              verdict_log: {
-                type: Type.STRING,
-                description: "A savage, 8-bit retro gaming announcer shout explaining the verdict in 1 short sentence."
+      // Server-side retry logic to handle upstream 429s gracefully
+      let result;
+      let lastError;
+      for (let i = 0; i < 3; i++) {
+        try {
+          const response = await ai.models.generateContent({
+            model: "gemini-flash-latest",
+            contents: userPrompt,
+            config: {
+              systemInstruction: systemInstruction,
+              temperature: 0.2,
+              tools: toolsConfig,
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  relation: {
+                    type: Type.STRING,
+                    enum: ["same_company", "same_group", "different"],
+                    description: "The relationship between the two companies."
+                  },
+                  confidence: {
+                    type: Type.STRING,
+                    enum: ["high", "medium", "low"],
+                    description: "Your confidence in the relationship."
+                  },
+                  verdict_log: {
+                    type: Type.STRING,
+                    description: "A savage, 8-bit retro gaming announcer shout explaining the verdict in 1 short sentence."
+                  }
+                },
+                required: ["relation", "confidence", "verdict_log"]
               }
-            },
-            required: ["relation", "confidence", "verdict_log"]
+            }
+          });
+          result = response;
+          break;
+        } catch (err: any) {
+          lastError = err;
+          const msg = err?.message?.toLowerCase() || "";
+          if (msg.includes("429") || msg.includes("quota") || msg.includes("limit")) {
+            console.warn(`[SERVER UPSTREAM] 429 Quota hit. Retrying in ${2000 * (i + 1)}ms...`);
+            await new Promise(r => setTimeout(r, 2000 * (i + 1)));
+            continue;
           }
+          throw err;
         }
-      });
+      }
 
-      const text = response.text;
+      if (!result) throw lastError;
+
+      const text = result.text;
       if (!text) {
         throw new Error("Empty response from Gemini.");
       }
@@ -100,7 +120,8 @@ Rules:
       if (errMsg.includes("api key not valid") || errMsg.includes("api_key_invalid")) {
          return res.status(401).json({ error: "API_KEY_INVALID", details: "The API key you provided was rejected by Google. Please check for typos and ensuring it's for the Gemini API." });
       }
-      res.status(500).json({ error: "Verification failed.", details: error?.message });
+      const isQuota = errMsg.includes("429") || errMsg.includes("quota") || errMsg.includes("resource_exhausted") || error?.status === "RESOURCE_EXHAUSTED";
+      res.status(isQuota ? 429 : 500).json({ error: "Verification failed.", details: error?.message });
     }
   });
 
