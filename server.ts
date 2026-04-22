@@ -18,12 +18,20 @@ async function startServer() {
       let toolsConfig: any[] | undefined = undefined;
 
       if (authPayload?.type === "password" && authPayload?.value === "@$#Pja123") {
-        if (!process.env.GEMINI_API_KEY) throw new Error("Server missing default env API key.");
-        ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        // The default server key does not support Google Search
-        toolsConfig = undefined;
+        const adminKey = process.env.CUSTOM_ADMIN_API_KEY || process.env.GEMINI_API_KEY;
+        if (!adminKey) throw new Error("Server missing default env API key or CUSTOM_ADMIN_API_KEY.");
+        ai = new GoogleGenAI({ apiKey: adminKey });
+        
+        // If they haven't explicitly set their own back-end key, we disable Google Search 
+        // because the default AI Studio container key does not support it and triggers a crash.
+        if (process.env.CUSTOM_ADMIN_API_KEY) {
+           toolsConfig = [{ googleSearch: {} }];
+        } else {
+           toolsConfig = undefined;
+        }
       } else if (authPayload?.type === "key" && authPayload?.value) {
-        ai = new GoogleGenAI({ apiKey: authPayload.value });
+        const customKey = authPayload.value.replace(/['"\s]/g, ""); // Thoroughly sanitize keys
+        ai = new GoogleGenAI({ apiKey: customKey });
         toolsConfig = [{ googleSearch: {} }];
       } else {
         return res.status(401).json({ error: "Unauthorized. Invalid Password or missing API Key." });
@@ -49,7 +57,7 @@ Rules:
 - Your 'verdict_log' must be a savage, 1-short-sentence arcade game announcer shout explaining your reason, including confirming if Search proved it!`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-1.5-flash",
+        model: "gemini-3-flash-preview",
         contents: userPrompt,
         config: {
           systemInstruction: systemInstruction,
@@ -88,6 +96,10 @@ Rules:
       res.json(parsed);
     } catch (error: any) {
       console.error("[AI Verification Error]:", error?.message || error);
+      const errMsg = error?.message?.toLowerCase() || "";
+      if (errMsg.includes("api key not valid") || errMsg.includes("api_key_invalid")) {
+         return res.status(401).json({ error: "API_KEY_INVALID", details: "The API key you provided was rejected by Google. Please check for typos and ensuring it's for the Gemini API." });
+      }
       res.status(500).json({ error: "Verification failed.", details: error?.message });
     }
   });

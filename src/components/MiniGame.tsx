@@ -47,24 +47,42 @@ export function MiniGame({ percent }: { percent: number }) {
   }, [sessionScore]);
 
   useEffect(() => {
-    if (bossMode) return;
-    const i = setInterval(() => {
-      setBugs(current => {
-        let next = [...current];
-        if (next.length > 4) next.shift(); // Max 5 bugs
-        const typeRoll = Math.random();
-        const type = (sessionScore > 1000 && typeRoll > 0.9) ? "golden" : (sessionScore > 2000 && typeRoll < 0.15) ? "skull" : "normal";
-        
-        next.push({
-          id: Math.random().toString(36),
-          x: 10 + Math.random() * 80,
-          y: 10 + Math.random() * 70,
-          type
-        });
-        return next;
-      });
-    }, speed);
-    return () => clearInterval(i);
+    let animationId: number;
+    let lastTime = 0;
+    let accumulatedTime = 0;
+
+    const tick = (time: number) => {
+      if (!lastTime) lastTime = time;
+      
+      if (!bossMode) {
+         const deltaTime = time - lastTime;
+         accumulatedTime += deltaTime;
+         
+         if (accumulatedTime > speed) {
+            accumulatedTime = 0;
+            setBugs(current => {
+              let next = [...current];
+              if (next.length > 4) next.shift(); // Max 5 bugs
+              const typeRoll = Math.random();
+              const type = (sessionScore > 1000 && typeRoll > 0.9) ? "golden" : (sessionScore > 2000 && typeRoll < 0.15) ? "skull" : "normal";
+              
+              next.push({
+                id: Math.random().toString(36),
+                x: 10 + Math.random() * 80,
+                y: 10 + Math.random() * 70,
+                type
+              });
+              return next;
+            });
+         }
+      }
+      
+      lastTime = time;
+      animationId = requestAnimationFrame(tick);
+    };
+
+    animationId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animationId);
   }, [speed, bossMode, sessionScore]);
 
   const addParticles = (x: number, y: number, color: string, count: number) => {

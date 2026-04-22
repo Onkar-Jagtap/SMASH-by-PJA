@@ -4,6 +4,7 @@ import EngineWorker from "./lib/engine.worker?worker";
 import { saveSession, loadSession, clearSession } from "./lib/session";
 import { MiniGame } from "./components/MiniGame";
 import { LootChest } from "./components/LootChest";
+import { BrainManualModal } from "./components/BrainManualModal";
 import { playBloop, playFight, setMuted } from "./lib/audio";
 import { motion } from "motion/react";
 
@@ -17,6 +18,7 @@ export default function App() {
   const [errorLog, setErrorLog] = useState("");
   const [showWarning, setShowWarning] = useState<"csv" | "xlsx" | null>(null);
   const [showLootChest, setShowLootChest] = useState(false);
+  const [showBrainManual, setShowBrainManual] = useState(false);
   
   const [tickerLog, setTickerLog] = useState<string>("SYSTEM IDLE... INSERT COIN");
   
@@ -26,10 +28,6 @@ export default function App() {
   const [authInput, setAuthInput] = useState("");
   const [authMode, setAuthMode] = useState<"password" | "key">("key");
   const [workerRef, setWorkerRef] = useState<Worker | null>(null);
-  
-  // Tokens 
-  const MAX_ADMIN_TOKENS = 50;
-  const [tokensUsed, setTokensUsed] = useState(0);
 
   React.useEffect(() => {
     // Check for cached session on mount
@@ -113,7 +111,6 @@ export default function App() {
     setResults([]);
     setErrorLog("");
     setProgress({ percent: 0, text: "SPAWNING KOMBATANTS..." });
-    setTokensUsed(0);
     
     if (workerRef) workerRef.terminate();
     
@@ -127,7 +124,6 @@ export default function App() {
       if (data.type === 'progress') {
         setProgress({ percent: data.percent, text: data.text });
         if (data.liveStr) setTickerLog(data.liveStr);
-        if (data.tokenConsumed) setTokensUsed(prev => prev + 1);
       } else if (data.type === 'done') {
         setResults(data.results);
         setTickerLog("MATCH COMPLETE! LOOT UNLOCKED! 🏆");
@@ -185,6 +181,16 @@ export default function App() {
          <div className="flex items-center gap-2 md:gap-4">
             <button 
                onClick={() => {
+                 playBloop();
+                 setShowBrainManual(true);
+               }}
+               className="hover:scale-105 transition-transform bg-[#f8d820] text-black border border-gray-600 px-2 py-1 flex gap-2 items-center focus:outline-none hidden sm:flex"
+               title="Brain & Manual"
+            >
+               🧠 MANUAL
+            </button>
+            <button 
+               onClick={() => {
                  const m = !isAudioMuted;
                  setIsAudioMuted(m);
                  setMuted(m);
@@ -199,22 +205,7 @@ export default function App() {
             {authPayload && (
               <>
                 <span className="hidden sm:inline">TOKENS:</span>
-                {authPayload.type === "password" ? (
-                  <>
-                    <div className="w-16 md:w-32 lg:w-48 h-4 bg-gray-800 border-2 border-white relative">
-                       <div 
-                         className="absolute top-0 left-0 h-full transition-all duration-300"
-                         style={{ 
-                           width: `${Math.min(100, Math.max(0, 100 - (tokensUsed / MAX_ADMIN_TOKENS) * 100))}%`,
-                           backgroundColor: tokensUsed > MAX_ADMIN_TOKENS ? "#e52521" : "#00B140"
-                         }}
-                       ></div>
-                    </div>
-                    <span>{Math.max(0, MAX_ADMIN_TOKENS - tokensUsed)}/{MAX_ADMIN_TOKENS}</span>
-                  </>
-                ) : (
-                   <span className="text-[#00B140] tracking-widest font-bold">UNLIMITED</span>
-                )}
+                <span className="text-[#00B140] tracking-widest font-bold">UNLIMITED</span>
               </>
             )}
          </div>
@@ -554,6 +545,14 @@ export default function App() {
             setShowLootChest(false);
             setShowWarning(null);
          }} />
+      )}
+
+      {/* Brain Manual Modal */}
+      {showBrainManual && (
+         <BrainManualModal 
+            onClose={() => setShowBrainManual(false)} 
+            playBloop={playBloop} 
+         />
       )}
 
       {/* Auth Gate Modal */}

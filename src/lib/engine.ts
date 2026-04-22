@@ -10,11 +10,11 @@ const MAX_CANDIDATES = 2000;
 const AI_MIN_SCORE = 0.65;
 const AI_MIN_OVERLAP = 0.50;
 
-const LEGAL_SUFFIX_RE = /\b(ltd|limited|pvt|private|inc|llc|corp|corporation|plc|co|company)\b\.?/gi;
+const LEGAL_SUFFIX_RE = /\b(ltd|limited|pvt|private|inc|llc|corp|corporation|plc|co|company|sa|s\.a|s\/a|ltda|s\.a\.|eireli|me|epp|mei)\b\.?/gi;
 
 const WEAK_TOKENS = new Set([
   "and", "the", "of", "in", "at", "for", "to", "a", "an", "is", "by", "or", "on", "as",
-  "de", "la", "le", "van", "von", "el", "al", "du", "das", "der", "die", "da", "do", "&",
+  "de", "la", "le", "van", "von", "el", "al", "du", "das", "der", "die", "da", "do", "e", "em", "para", "com", "&",
 ]);
 
 const ABBREV_MAP: Record<string, string> = {
@@ -37,6 +37,7 @@ const ABBREV_MAP: Record<string, string> = {
   "lt": "larsen toubro", "bpcl": "bharat petroleum corporation",
   "hpcl": "hindustan petroleum corporation", "ongc": "oil natural gas corporation",
   "ntpc": "national thermal power corporation", "coal": "coal india",
+  "s.a.": " ", "sa": " ", "ltda": " ", "eireli": " ", "mei": " ", "me": " ", "epp": " ", "s/a": " "
 };
 
 const INDUSTRY_CLUSTERS = [
@@ -75,7 +76,7 @@ const CONGLOMERATE_MAP: Record<string, string | null> = {
   "sterlite": "vedanta_group", "suzuki": "maruti_suzuki_group", "maruti": "maruti_suzuki_group",
   "honda": "honda_group", "toyota": "toyota_group", "ford": "ford_group",
   "volkswagen": "volkswagen_group", "audi": "volkswagen_group", "skoda": "volkswagen_group",
-  "porsche": "volkswagen_group",
+  "porsche": "volkswagen_group", "grupo": null, // 'grupo' itself is not a conglomerate identifier
 };
 
 // Caches
@@ -86,7 +87,10 @@ const GENERIC_TOKENS = new Set([
   "services", "enterprises", "international", "industries", "consulting",
   "management", "partners", "ventures", "capital", "network", "networks",
   "media", "financial", "digital", "global", "corporation", "communications",
-  "software", "logistics"
+  "software", "logistics", "tecnologias", "tecnologia", "solucoes", "soluções",
+  "grupo", "sistema", "sistemas", "servicos", "serviços", "participacoes", "participações",
+  "comercio", "industria", "educacao", "educação", "turismo", "brasil", "brazil", "agencia", "oficial",
+  "instituto", "nacional", "sul", "norte", "leste", "oeste", "centro", "tecnologico", "tecnológico"
 ]);
 
 function normalizeName(raw: string) {
@@ -94,7 +98,9 @@ function normalizeName(raw: string) {
   const key = raw;
   if (caches.normCache.has(key)) return caches.normCache.get(key);
 
-  let n = raw.toLowerCase().trim();
+  let n = raw.normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Strip accents FIRST
+  n = n.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2"); // Split camelCase
+  n = n.toLowerCase().trim();
   n = n.replace(/^\uFEFF/, "");
   n = n.replace(/[&]/g, " and ");
   n = n.replace(/[^\w\s]/g, " ");
@@ -177,6 +183,32 @@ function computeScore(input: string, candidate: string) {
 
 function applyDeterministicRules(input: string, candidate: string) {
   const ni = normalizeName(input), nc = normalizeName(candidate);
+  
+  // 1. Generic Shield: If the ONLY words they share are generic words, KILL the match instantly.
+  // Example: "Grupo A" vs "Grupo IN" -> only share "Grupo", which is generic -> KILL.
+  // Example: "A+ Tecnologia" vs "Luby Tecnologia" -> only share "Tecnologia", which is generic -> KILL.
+  // Exception: if both strings ONLY consist of generic tokens, don't apply this block as they might actually be a match
+  const taSet = new Set(tokenize(input));
+  const tbSet = new Set(tokenize(candidate));
+  const sharedTokens = [...taSet].filter(t => tbSet.has(t));
+  const hasStrongSharedTokens = sharedTokens.some(t => !GENERIC_TOKENS.has(t));
+  
+  if (taSet.size === 0 || tbSet.size === 0) return null; // If input is purely punctuation/noise
+  
+  const aHasStrong = [...taSet].some(t => !GENERIC_TOKENS.has(t));
+  const bHasStrong = [...tbSet].some(t => !GENERIC_TOKENS.has(t));
+
+  if (sharedTokens.length > 0 && !hasStrongSharedTokens && (aHasStrong || bHasStrong)) {
+     // However, ensure they aren't actually acronyms or single characters masquerading as similar (like A+ and A)
+     const cleanA = tokenize(input).filter(t => !GENERIC_TOKENS.has(t)).join("");
+     const cleanB = tokenize(candidate).filter(t => !GENERIC_TOKENS.has(t)).join("");
+     
+     // If the specific names are wildly different (A vs IN) block it. If they are very similar (A+ vs A) allow it to continue to AI.
+     if (charRatio(cleanA, cleanB) < 0.6) {
+        return { relation: "different", confidence: "high", source: "generic_override", verdict_log: "GENERIC WORD SHIELD DEPLOYED! NAMES ONLY SHARE NOISE!" };
+     }
+  }
+
   if (ni && nc && ni === nc) return { relation: "same_company", confidence: "very_high", source: "exact_match", verdict_log: "FLAWLESS VICTORY! PERFECT EXACT MATCH!" };
   
   const ta = tokenize(input).filter(t => !WEAK_TOKENS.has(t));
@@ -201,7 +233,11 @@ function applyDeterministicRules(input: string, candidate: string) {
 }
 
 function detectIndustryConflict(a: string, b: string) {
-  const ta = new Set<string>(tokenize(a)), tb = new Set<string>(tokenize(b));
+  const ta = new Set<string>(tokenize(a).filter(t => !GENERIC_TOKENS.has(t)));
+  const tb = new Set<string>(tokenize(b).filter(t => !GENERIC_TOKENS.has(t)));
+  
+  if (ta.size === 0 || tb.size === 0) return false; // Don't conflict if only generic tokens remain
+  
   const shared = [...ta].filter(t => tb.has(t) && t.length >= 4);
   if (shared.length > 0) return false;
 
@@ -215,11 +251,11 @@ function detectIndustryConflict(a: string, b: string) {
   return false;
 }
 
-function applyClassificationRules(score: number, overlap: number) {
-  if (overlap < 0.4) return { relation: "different", confidence: "high", source: "hard_rejection_overlap", verdict_log: "WEAK MANA! HARSH REJECTION BY THE ENGINE!" };
-  if (score >= 0.95 && overlap >= 0.85) return { relation: "same_company", confidence: "high", source: "score_rule_t1", verdict_log: "OVER 9000! ULTRA HIGH SCORE AUTOMATCH!" };
-  if (score < 0.65 || overlap < 0.5) return { relation: "different", confidence: "high", source: "low_score_rule", verdict_log: "MISSED ATTACK! SCORE IS TOO LOW TO QUALIFY!" };
-  // Return null to drop into the AI Arena for everything between 0.65 and 0.95
+function applyClassificationRules(score: number, overlap: number, isSubset: boolean) {
+  if (!isSubset && overlap < 0.45) return { relation: "different", confidence: "high", source: "hard_rejection_overlap", verdict_log: "WEAK MANA! HARSH REJECTION BY THE ENGINE!" };
+  if (score >= 0.95 && (overlap >= 0.85 || isSubset)) return { relation: "same_company", confidence: "high", source: "score_rule_t1", verdict_log: "OVER 9000! ULTRA HIGH SCORE AUTOMATCH!" };
+  if (score < 0.65 || (!isSubset && overlap < 0.55)) return { relation: "different", confidence: "high", source: "low_score_rule", verdict_log: "MISSED ATTACK! SCORE IS TOO LOW TO QUALIFY!" };
+  // Return null to drop into the AI Arena for everything else
   return null;
 }
 
@@ -284,7 +320,11 @@ async function callAI(input: string, candidate: string, score: number, overlap: 
 
       if (!aiRes.ok) {
         if (aiRes.status === 401) {
-          throw new Error("UNAUTHORIZED! WRONG API KEY OR PASSWORD!");
+           const parsed = await aiRes.json().catch(() => ({}));
+           if (parsed?.error === "API_KEY_INVALID") {
+              throw new Error("THE API KEY YOU PROVIDED IS INVALID! CHECK FOR TYPOS OR PERMISSIONS.");
+           }
+           throw new Error("UNAUTHORIZED! WRONG API KEY OR PASSWORD!");
         }
         console.warn(`[AI] HTTP ${aiRes.status}`);
         return store(AI_FALLBACK);
@@ -298,17 +338,20 @@ async function callAI(input: string, candidate: string, score: number, overlap: 
     }
   } catch (err: any) {
     console.warn("[AI] Exception:", err.message);
+    if (err.message.includes("API KEY YOU PROVIDED IS INVALID") || err.message.includes("UNAUTHORIZED!")) {
+       throw err; // DO NOT SWALLOW FATAL AUTH ERRORS
+    }
     return store(AI_FALLBACK);
   }
 }
 
-function validateAIResult(aiResult: any, score: number, overlap: number) {
+function validateAIResult(aiResult: any, score: number, overlap: number, isSubset: boolean) {
   const { relation, confidence, source, verdict_log } = aiResult;
-  if (confidence !== "high") return { relation: "different", confidence: "high", source: "ai_downgraded_low_conf", verdict_log: "DOWNGRADED! AI LACKED RESOLVE (LOW CONFIDENCE)!" };
-  if (relation === "same_company" && score < 0.85) return { relation: "same_group", confidence: "high", source: "ai_downgraded_score", verdict_log: "NERFED! MOVED TO SAME GROUP DUE TO LOW BASE SCORE!" };
-  if (relation === "same_group" && score < 0.65) return { relation: "different", confidence: "high", source: "ai_downgraded_group_score", verdict_log: "REJECTED! SAME GROUP CLAIM OVERRULED BY ABYSMAL SCORE!" };
-  if (relation !== "different" && overlap < 0.4) return { relation: "different", confidence: "high", source: "ai_overridden_overlap", verdict_log: "VETOED! AI CLAIM WAS BUSTED BY LOW TOKEN OVERLAP!" };
-  if (relation === "same_company" && overlap < 0.5) return { relation: "same_group", confidence: "high", source: "ai_downgraded_overlap", verdict_log: "NERFED! REDUCED TO SAME GROUP (WEAK TOKEN OVERLAP)!" };
+  if (confidence === "low") return { relation: "different", confidence: "high", source: "ai_downgraded_low_conf", verdict_log: "DOWNGRADED! AI LACKED RESOLVE (LOW CONFIDENCE)!" };
+  if (relation === "same_company" && score < 0.70) return { relation: "same_group", confidence: "high", source: "ai_downgraded_score", verdict_log: "NERFED! MOVED TO SAME GROUP DUE TO LOW BASE SCORE!" };
+  if (relation === "same_group" && score < 0.50) return { relation: "different", confidence: "high", source: "ai_downgraded_group_score", verdict_log: "REJECTED! SAME GROUP CLAIM OVERRULED BY ABYSMAL SCORE!" };
+  if (relation !== "different" && !isSubset && overlap < 0.35) return { relation: "different", confidence: "high", source: "ai_overridden_overlap", verdict_log: "VETOED! AI CLAIM WAS BUSTED BY LOW TOKEN OVERLAP!" };
+  if (relation === "same_company" && !isSubset && overlap < 0.40) return { relation: "same_group", confidence: "high", source: "ai_downgraded_overlap", verdict_log: "NERFED! REDUCED TO SAME GROUP (WEAK TOKEN OVERLAP)!" };
   return { relation, confidence, source, verdict_log };
 }
 
@@ -402,26 +445,42 @@ export async function runEngine(
 
       const matches = [];
       for (const { candidate, score } of top) {
+        const ta = new Set<string>(tokenize(input));
+        const tb = new Set<string>(tokenize(candidate));
+        
+        // Block empty matches early before overlap metrics blow up.
+        if (ta.size === 0 || tb.size === 0) {
+           matches.push({ candidate, score: 0, overlap: 0, relation: "different", confidence: "high", source: "noise_rejection", verdict_log: "REJECTED! NOISE WORDS DETECTED!" });
+           continue;
+        }
+
         const overlap = tokenOverlap(input, candidate);
 
-        const det = applyDeterministicRules(input, candidate);
-        if (det) {
-          matches.push({ candidate, score: +score.toFixed(4), overlap: +overlap.toFixed(3), ...det });
-          continue;
-        }
+        const inter = [...ta].filter(t => tb.has(t)).length;
+        let isSubset = false;
+        if (inter > 0 && inter === Math.min(ta.size, tb.size)) isSubset = true;
+        const ni = normalizeName(input), nc = normalizeName(candidate);
+        if (nc.length > 4 && ni.includes(nc)) isSubset = true;
+        if (ni.length > 4 && nc.includes(ni)) isSubset = true;
+
+          const det = applyDeterministicRules(input, candidate);
+          if (det) {
+            matches.push({ candidate, score: +score.toFixed(4), overlap: +overlap.toFixed(3), ...det });
+            continue;
+          }
 
         if (detectIndustryConflict(input, candidate)) {
           matches.push({ candidate, score: +score.toFixed(4), overlap: +overlap.toFixed(3), relation: "different", confidence: "high", source: "industry_conflict", verdict_log: "COMBO BREAKER! ASSASSINATED BY INDUSTRY CONFLICT!" });
           continue;
         }
 
-        const rule = applyClassificationRules(score, overlap);
+        const rule = applyClassificationRules(score, overlap, isSubset);
         if (rule) {
           matches.push({ candidate, score: +score.toFixed(4), overlap: +overlap.toFixed(3), ...rule });
           continue;
         }
 
-        if (score < AI_MIN_SCORE || overlap < AI_MIN_OVERLAP) {
+        if (score < AI_MIN_SCORE || (!isSubset && overlap < 0.55)) {
           matches.push({ candidate, score: +score.toFixed(4), overlap: +overlap.toFixed(3), relation: "different", confidence: "high", source: "ai_eligibility_rejected", verdict_log: "PUNY STATS! REJECTED BEFORE ENTERING THE AI ARENA!" });
           continue;
         }
@@ -437,7 +496,7 @@ export async function runEngine(
           const isCached = caches.aiCache.has(pairKey);
           if (!isCached) onProgress(-1, "", undefined, true); // Dispatch token consumed
           const raw = await callAI(input, candidate, score, overlap, authPayload);
-          const validated = validateAIResult(raw, score, overlap);
+          const validated = validateAIResult(raw, score, overlap, isSubset);
           matches.push({ candidate, score: +score.toFixed(4), overlap: +overlap.toFixed(3), ...validated });
         } else {
           const heuristic = (score >= 0.90 && overlap >= 0.8) ? "same_company" : (score >= 0.80 && overlap >= 0.6) ? "same_group" : "different";
