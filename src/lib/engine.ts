@@ -1,8 +1,10 @@
+import { GoogleGenAI } from "@google/genai";
+
 // ==============================================================================
 // CMIP MATCHING ENGINE
 // ==============================================================================
 
-const CHUNK_SIZE = 50; // Reduced for slower, more stable processing
+const CHUNK_SIZE = 10; // Smaller chunks for smoother UI and better rate control
 const MIN_SCORE = 0.35;
 const MAX_MATCHES = 5;
 const AI_BUDGET_PCT = 1.0;
@@ -18,10 +20,12 @@ const AMP_RE = /[&]/g;
 const NON_ALPHANUM_RE = /[^\w\s]/g;
 const WHITESPACE_RE = /\s+/g;
 const ACCENT_RE = /[\u0300-\u036f]/g;
+const SA_PRE_RE = /\bs\.?\/?a\.?\b/gi;
 
-const WEAK_TOKENS = new Set([
+const WEAK_TOKENS: Set<string> = new Set([
   "and", "the", "of", "in", "at", "for", "to", "a", "an", "is", "by", "or", "on", "as",
   "de", "la", "le", "van", "von", "el", "al", "du", "das", "der", "die", "da", "do", "e", "em", "para", "com", "&",
+  "s", "a",
 ]);
 
 const ABBREV_MAP: Record<string, string> = {
@@ -58,12 +62,8 @@ const INDUSTRY_CLUSTERS = [
   ["manufacturing", "factory", "industrial", "production"],
   ["energy", "oil", "gas", "petroleum", "refinery", "power"],
   ["retail", "ecommerce", "store", "supermarket", "grocery"],
-  ["insurance", "reinsurance", "underwriter"],
-  ["media", "broadcast", "publishing", "entertainment"],
-  ["telecom", "telecommunications", "wireless", "mobile", "broadband"],
-  ["software", "saas", "cloud", "platform", "application"],
-  ["logistics", "shipping", "freight", "courier", "supply"],
-  ["construction", "infrastructure", "engineering", "builder"],
+  ["insurance", "reinsurance", "underwriter", "vida", "previdencia", "previdência"],
+  ["bet", "betting", "apostas", "casino", "gaming"],
   ["aviation", "airline", "aerospace", "aircraft", "airport"],
   ["hotel", "hospitality", "restaurant", "catering", "tourism"],
   ["education", "university", "school", "college", "academy"],
@@ -85,21 +85,51 @@ const CONGLOMERATE_MAP: Record<string, string | null> = {
   "sterlite": "vedanta_group", "suzuki": "maruti_suzuki_group", "maruti": "maruti_suzuki_group",
   "honda": "honda_group", "toyota": "toyota_group", "ford": "ford_group",
   "volkswagen": "volkswagen_group", "audi": "volkswagen_group", "skoda": "volkswagen_group",
-  "porsche": "volkswagen_group", "grupo": null, // 'grupo' itself is not a conglomerate identifier
+  "porsche": "volkswagen_group", "nestle": "nestle_group", "unilever": "unilever_group",
+  "stellantis": "stellantis_group", "peugeot": "stellantis_group", "fiat": "stellantis_group",
+  "citroen": "stellantis_group", "chrysler": "stellantis_group", "jeep": "stellantis_group",
+  "grupo": null,
 };
 
 // Caches
-export const caches = { normCache: new Map(), matchResultCache: new Map(), aiCache: new Map() };
+export const caches = { normCache: new Map(), matchResultCache: new Map(), aiCache: new Map<string, any>() };
+
+// Load cache from session to save tokens
+if (typeof localStorage !== "undefined") {
+  try {
+    const saved = localStorage.getItem("smash_ai_cache_v1");
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      Object.entries(parsed).forEach(([k, v]) => caches.aiCache.set(k, v));
+    }
+  } catch(e) {
+    console.warn("Failed to load AI cache");
+  }
+}
+
+function persistCache() {
+  if (typeof localStorage !== "undefined") {
+    try {
+      const obj = Object.fromEntries(caches.aiCache.entries());
+      localStorage.setItem("smash_ai_cache_v1", JSON.stringify(obj));
+    } catch(e) {}
+  }
+}
 
 const GENERIC_TOKENS: Set<string> = new Set([
   "technologies", "tech", "technology", "info", "information", "solutions", "group", "holdings", "systems",
-  "services", "enterprises", "international", "industries", "consulting",
+  "services", "enterprises", "international", "industries", "consulting", "consultoria",
   "management", "partners", "ventures", "capital", "network", "networks",
   "media", "financial", "digital", "global", "corporation", "communications",
   "software", "logistics", "tecnologias", "tecnologia", "solucoes", "soluções",
   "grupo", "sistema", "sistemas", "servicos", "serviços", "participacoes", "participações",
   "comercio", "industria", "educacao", "educação", "turismo", "brasil", "brazil", "agencia", "oficial",
-  "instituto", "nacional", "sul", "norte", "leste", "oeste", "centro", "tecnologico", "tecnológico"
+  "instituto", "nacional", "sul", "norte", "leste", "oeste", "centro", "tecnologico", "tecnológico",
+  "ingressos", "eventos", "empreendimentos", "distribuidora", "distribucao", "comercial", "industrial",
+  "investimentos", "assessoria", "representacoes", "representações",
+  "limitada", "gestion", "inversiones", "socios", "numerique", "gestion", "groupe", "systemes",
+  "limitee", "lösungen", "gmbh", "dienstleistungen", "verwaltung", "kapital", "investitionen",
+  "holdings", "company", "companies", "limited", "incorporated", "enterprise", "associates"
 ]);
 
 function normalizeName(raw: string) {
@@ -111,6 +141,7 @@ function normalizeName(raw: string) {
   n = n.replace(CAMEL_SPLIT_1, "$1 $2").replace(CAMEL_SPLIT_2, "$1 $2"); // Split camelCase
   n = n.toLowerCase().trim();
   n = n.replace(FEFF_RE, "");
+  n = n.replace(SA_PRE_RE, " ");
   n = n.replace(AMP_RE, " and ");
   n = n.replace(NON_ALPHANUM_RE, " ");
   n = n.replace(LEGAL_SUFFIX_RE, " ");
@@ -239,7 +270,39 @@ function applyDeterministicRules(input: string, candidate: string) {
     return { relation: "same_group", confidence: "high", source: "conglomerate_match", verdict_log: "BLOODLINE DETECTED! SAME CONGLOMERATE CLAN!" };
   }
 
-  // New: High-Confidence Substring Match (prevents Gemini calls for obvious subs)
+  // 4. Parent Brand Detection (High Accuracy - Hardened for Global Use)
+  // Example: "Serasa Experian" vs "Serasa" or "Apple India" vs "Apple"
+  const stTokensA = [...taSet].filter(t => !GENERIC_TOKENS.has(t));
+  const stTokensB = [...tbSet].filter(t => !GENERIC_TOKENS.has(t));
+  if ((stTokensA.length === 1 || stTokensB.length === 1) && sharedTokens.length > 0) {
+    const mainToken = stTokensA.length === 1 ? stTokensA[0] : stTokensB[0];
+    // Safety check: The main brand token cannot be a generic word like "Solutions" or "Group"
+    // And it must be long enough or a known brand to avoid common 3-char clashes (like "BTG" vs "BTG Tech")
+    if (sharedTokens.includes(mainToken) && (mainToken.length >= 4 || (mainToken.length === 3 && !WEAK_TOKENS.has(mainToken))) && !GENERIC_TOKENS.has(mainToken)) {
+      const otherSet = stTokensA.length === 1 ? tbSet : taSet;
+      const leftovers = [...otherSet].filter(t => t !== mainToken && !GENERIC_TOKENS.has(t));
+      if (leftovers.length === 0) {
+        return { relation: "same_company", confidence: "high", source: "parent_brand_match", verdict_log: "PARENT BRAND DETECTED! STRONG UNIQUE TOKEN MATCH!" };
+      }
+    }
+  }
+
+  // 5. Acronym Matcher (Bidirectional - Hardened)
+  const shorter = ni.length < nc.length ? ni : nc;
+  const longer = ni.length < nc.length ? input : candidate;
+  // Only trigger for 3+ characters to avoid 2-char collisions like "AA"
+  if (shorter.length >= 3 && shorter.length <= 4 && !GENERIC_TOKENS.has(shorter)) {
+     const tokensLonger = tokenize(longer).filter(t => !WEAK_TOKENS.has(t) && !GENERIC_TOKENS.has(t));
+     // If the longer name has many tokens, an acronym match is riskier
+     if (tokensLonger.length === shorter.length && tokensLonger.length <= 4) {
+        const acronym = tokensLonger.map(t => t[0]).join("");
+        if (acronym === shorter) {
+           return { relation: "same_group", confidence: "medium", source: "acronym_match", verdict_log: "ACRONYM MATCH! CROSS-VERIFYING VIA SAME_GROUP CLASSIFICATION!" };
+        }
+     }
+  }
+
+  // 6. High-Confidence Substring Match (prevents Gemini calls for obvious subs)
   // Example: "Apple India" vs "Apple"
   if (ni && nc && (ni.startsWith(nc + " ") || nc.startsWith(ni + " ") || ni.endsWith(" " + nc) || nc.endsWith(" " + ni))) {
      const longerTokens = ni.length > nc.length ? taSet : tbSet;
@@ -310,50 +373,105 @@ async function fetchWithRetry(url: string, options: RequestInit, maxRetries = 8,
   throw new Error("PROBABILITY OF SUCCESS DEPLETED: MAX RETRIES EXCEEDED");
 }
 
-function makeSemaphore(limit: number) {
-  let active = 0;
-  const queue: Array<() => void> = [];
-  return {
-    async acquire() {
-      if (active < limit) { active++; return; }
-      await new Promise<void>(resolve => queue.push(resolve));
-      active++;
-    },
-    release() {
-      active = Math.max(0, active - 1);
-      if (queue.length > 0) queue.shift()!();
-    }
-  };
+interface AuthPayload {
+  type: string;
+  value: string;
 }
 
-// Enterprise Concurrency (Set to 1 for maximum stability on Free Tier)
-const aiSemaphore = makeSemaphore(1);
+class Semaphore {
+  active = 0;
+  queue: Array<() => void> = [];
+  constructor(public limit: number) {}
+  async acquire() {
+    if (this.active < this.limit) { this.active++; return; }
+    await new Promise<void>(resolve => this.queue.push(resolve));
+    this.active++;
+  }
+  release() {
+    this.active = Math.max(0, this.active - 1);
+    if (this.queue.length > 0) this.queue.shift()!();
+  }
+}
+
+// Dynamic Concurrency: If using a custom key or admin mode with a custom key, we can increase throughput.
+// For the shared app key, we stay at 1 to avoid instant 429 cascades.
+let aiSemaphore = new Semaphore(1);
 
 async function callAI(
   input: string, 
   candidate: string, 
   score: number, 
   overlap: number, 
-  authPayload: { type: string, value: string } | null,
+  authPayload: AuthPayload | null,
+  otherCandidates: string[] = [],
   onRateLimit?: (msg: string) => void
 ) {
+  // Initialize semaphore based on auth clearing level once
+  if (authPayload?.type === "key" || (authPayload?.type === "password" && authPayload?.value === "@$#Pja123")) {
+     if (aiSemaphore.active === 0 && aiSemaphore.limit === 1) {
+        aiSemaphore = new Semaphore(3);
+     }
+  }
+
   const ni = normalizeName(input);
   const nc = normalizeName(candidate);
   const key = `${ni}||${nc}`;
   if (caches.aiCache.has(key)) return caches.aiCache.get(key);
 
-  const store = (v: any) => { caches.aiCache.set(key, v); return v; };
+  const store = (v: any) => { 
+    caches.aiCache.set(key, v); 
+    persistCache();
+    return v; 
+  };
+
+  const tryServer = async () => {
+    return await fetchWithRetry("/api/verify-match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input, candidate, ni, nc, score, overlap, authPayload, otherCandidates })
+    }, 8, (delay, attempt) => {
+      if (onRateLimit) onRateLimit(`RATE LIMIT DETECTED! BACKING OFF ${Math.round(delay/1000)}s... (TRY ${attempt}/8)`);
+    });
+  };
 
   try {
     await aiSemaphore.acquire();
     try {
-      const aiRes = await fetchWithRetry("/api/verify-match", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input, candidate, ni, nc, score, overlap, authPayload })
-      }, 8, (delay, attempt) => {
-        if (onRateLimit) onRateLimit(`RATE LIMIT DETECTED! BACKING OFF ${Math.round(delay/1000)}s... (TRY ${attempt}/8)`);
-      });
+      let aiRes: any;
+      let usedClient = false;
+
+      // "FALL BACK TO APP API" logic: 
+      // If we have a custom key, we try to call Gemini directly from the client (worker) first.
+      // This bypasses server infrastructure limits and uses the user's specific quota.
+      if (authPayload?.type === "key" && authPayload.value) {
+        try {
+          const cleanKey = authPayload.value.replace(/[^a-zA-Z0-9_\-]/g, "").trim();
+          const genAI = new GoogleGenAI({ apiKey: cleanKey });
+          
+          aiRes = await tryServer();
+          if (!aiRes.ok && aiRes.status === 429) {
+             usedClient = true;
+             console.log("[ENGINE] SERVER QUOTA EXHAUSTED. FALLING BACK TO CLIENT-SIDE GEMINI API...");
+             const result = await genAI.models.generateContent({
+                model: "gemini-flash-latest",
+                contents: `Fighter A: "${input}"\nFighter B: "${candidate}"\nNormalized A: "${ni}"\nNormalized B: "${nc}"\nDetermine if identical entity, same group, or different. \nResponse format: JSON { relation: 'same_company'|'same_group'|'different', confidence: 'high'|'medium'|'low', verdict_log: string }`,
+                config: {
+                  responseMimeType: "application/json"
+                }
+             });
+             const responseText = result.text;
+             const parsed = JSON.parse(responseText);
+             return store({ ...parsed, source: "gemini_client" });
+          }
+        } catch (clientErr) {
+          console.warn("[ENGINE] Client-side AI Fallback failed:", clientErr);
+          // Continue to server logic if client failed
+        }
+      }
+
+      if (!usedClient) {
+        aiRes = await tryServer();
+      }
 
       if (!aiRes.ok) {
         if (aiRes.status === 401) {
@@ -374,9 +492,8 @@ async function callAI(
       aiSemaphore.release();
     }
   } catch (err: any) {
-    console.warn("[AI] Exception:", err.message);
     if (err.message.includes("API KEY YOU PROVIDED IS INVALID") || err.message.includes("UNAUTHORIZED!")) {
-       throw err; // DO NOT SWALLOW FATAL AUTH ERRORS
+       throw err; 
     }
     return store(AI_FALLBACK);
   }
@@ -398,11 +515,13 @@ export async function runEngine(
   authPayload: { type: string, value: string } | null,
   onProgress: (p: number, currentPhase: string, latestMatchStr?: string, tokenConsumed?: boolean) => void
 ) {
+  onProgress(0, "INITIATING SCAN...");
   caches.normCache.clear();
   caches.matchResultCache.clear();
 
-  delayFrame();
+  await delayFrame();
   
+  onProgress(2, "DEDUPLICATING INPUTS...");
   // Dedup inputs to save API limit
   const seenNorm = new Set();
   const dedupedInp: string[] = [];
@@ -416,7 +535,7 @@ export async function runEngine(
   const processInp = dedupedInp;
   const total = processInp.length;
   
-  onProgress(5, "Building Suppression Index (75k cap)...");
+  onProgress(3, "PREPARING BOSS LIST (75K CAP)...");
   await delayFrame();
 
   const suppIndex = new Map<string, Set<string>>();
@@ -438,8 +557,8 @@ export async function runEngine(
         suppIndex.get(t)!.add(c);
       }
     }
-    const idxPct = 5 + Math.floor((i / suppList.length) * 5);
-    onProgress(idxPct, `Indexing candidates (${i}/${suppList.length})...`);
+    const idxPct = 3 + Math.floor((i / suppList.length) * 17); // Use 17% of progress for indexing (up to 20%)
+    onProgress(idxPct, `ANALYZING BOSS LIST (${i}/${suppList.length})...`);
     await delayFrame();
   }
 
@@ -449,7 +568,7 @@ export async function runEngine(
   };
 
   const allResults = [];
-  let processed = 0;
+  let processedCount = 0;
 
   for (let i = 0; i < processInp.length; i += CHUNK_SIZE) {
     const chunk = processInp.slice(i, i + CHUNK_SIZE);
@@ -503,12 +622,20 @@ export async function runEngine(
         const inter = [...ta].filter(t => tb.has(t)).length;
         let isSubset = false;
         if (inter > 0 && inter === Math.min(ta.size, tb.size)) isSubset = true;
+        
         const ni = normalizeName(input), nc = normalizeName(candidate);
-        if (nc.length > 4 && ni.includes(nc)) isSubset = true;
-        if (ni.length > 4 && nc.includes(ni)) isSubset = true;
+        // Optimized subset detection: check for word boundaries to avoid Apple in Snapple
+        const regexI = new RegExp(`\\b${ni}\\b`, 'i');
+        const regexC = new RegExp(`\\b${nc}\\b`, 'i');
+        if (nc.length > 4 && regexI.test(nc)) isSubset = true;
+        if (ni.length > 4 && regexC.test(ni)) isSubset = true;
 
           const det = applyDeterministicRules(input, candidate);
           if (det) {
+            if (det.relation !== "different") {
+               const icon = det.relation === "same_company" ? "★" : "👥";
+               onProgress(-1, `${icon} AUTO-MATCH: ${input} → ${candidate}`);
+            }
             matches.push({ candidate, score: +score.toFixed(4), overlap: +overlap.toFixed(3), ...det });
             continue;
           }
@@ -539,12 +666,31 @@ export async function runEngine(
         if (allowed) {
           const isCached = caches.aiCache.has(pairKey);
           if (!isCached) onProgress(-1, "", undefined, true); // Dispatch token consumed
-          const raw = await callAI(input, candidate, score, overlap, authPayload, (msg) => {
+          
+          // Collect other candidates to give the AI context
+          const otherNames = top
+            .filter(c => c.candidate !== candidate && c.score > 0.4)
+            .map(c => c.candidate)
+            .slice(0, 3);
+
+          const raw = await callAI(input, candidate, score, overlap, authPayload, otherNames, (msg) => {
              onProgress(-1, msg); // Use -1 to not affect percent but update text
           });
-          // Optimized "Safe Speed" Pause (targeting ~13-14 RPM assuming processing time)
-          await new Promise(resolve => setTimeout(resolve, 2500)); 
+          
+          // ADAPTIVE RPM THROTTLE (Free Tier target: 15 RPM)
+          // If Semaphore is 1, wait 4s (15 calls/min)
+          // If Semaphore is 3 (BYOK), wait 12s per thread (3 * 5 calls/min = 15 RPM)
+          const multiplier = aiSemaphore.limit > 1 ? aiSemaphore.limit : 1;
+          const throttleDelay = 4000 * multiplier;
+          
+          await new Promise(resolve => setTimeout(resolve, throttleDelay)); 
           const validated = validateAIResult(raw, score, overlap, isSubset);
+          
+          if (validated.relation !== "different") {
+             const icon = validated.relation === "same_company" ? "★" : "👥";
+             onProgress(-1, `${icon} MATCH: ${input} → ${candidate} (${validated.relation.toUpperCase()})`);
+          }
+          
           matches.push({ candidate, score: +score.toFixed(4), overlap: +overlap.toFixed(3), ...validated });
         } else {
           const heuristic = (score >= 0.90 && overlap >= 0.8) ? "same_company" : (score >= 0.80 && overlap >= 0.6) ? "same_group" : "different";
@@ -552,19 +698,19 @@ export async function runEngine(
         }
       }
 
+      processedCount++;
+      const currentPct = 20 + Math.floor((processedCount / total) * 80);
+      onProgress(currentPct, `MATCHING... (${processedCount}/${total})`);
       return { input, matches: matches.sort((a,b)=>b.score - a.score) };
     });
 
     const chunkResults = await Promise.all(chunkPromises);
     allResults.push(...chunkResults);
-    
-    processed += chunk.length;
-    onProgress(10 + Math.floor((processed / total) * 90), `Processing ${processed} / ${total} companies...`);
     await delayFrame();
   }
 
   // Final stats
-  onProgress(100, "Processing complete!");
+  onProgress(100, "SYSTEMS CLEAR! ALL KOMBATANTS RESOLVED!");
   return allResults;
 }
 

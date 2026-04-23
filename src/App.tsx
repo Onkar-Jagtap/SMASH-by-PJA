@@ -19,6 +19,7 @@ export default function App() {
   const [showWarning, setShowWarning] = useState<"csv" | "xlsx" | null>(null);
   const [showLootChest, setShowLootChest] = useState(false);
   const [showBrainManual, setShowBrainManual] = useState(false);
+  const [hasMasterKey, setHasMasterKey] = useState(false);
   
   const [tickerLog, setTickerLog] = useState<string>("SYSTEM IDLE... INSERT COIN");
   
@@ -30,6 +31,11 @@ export default function App() {
   const [workerRef, setWorkerRef] = useState<Worker | null>(null);
 
   React.useEffect(() => {
+    // Check server master key status (BYOK)
+    fetch("/api/config").then(r => r.json()).then(d => {
+       if (d.hasMasterKey) setHasMasterKey(true);
+    }).catch(console.error);
+
     // Check for cached session on mount
     loadSession('activeSession').then(data => {
        if (data && data.targetList?.length > 0) {
@@ -100,6 +106,8 @@ export default function App() {
       return;
     }
     
+    // 🥊 AUTHENTICATION CHECK: Always require a gate entry for security.
+    // If you want to use the server's Master Key, enter the Admin Password.
     if (!authPayload) {
        playBloop();
        setShowAuthGate(true);
@@ -170,6 +178,12 @@ export default function App() {
                  {authPayload.type === "password" ? "ADMIN" : "API KEY"}
                </span>
              </>
+           ) : hasMasterKey ? (
+             <>
+               <span className="animate-pulse text-[#00B140]">🔵</span>
+               <span className="hidden sm:inline">MASTER BYOK ENGINE READY</span>
+               <span className="sm:hidden">BYOK ACTIVE</span>
+             </>
            ) : (
              <>
                <span className="animate-pulse text-[#e52521]">🔴</span>
@@ -202,7 +216,7 @@ export default function App() {
                {isAudioMuted ? "🔇 MUTE ON" : "🔊 MUTE OFF"}
             </button>
 
-            {authPayload && (
+            {(authPayload || hasMasterKey) && (
               <>
                 <span className="hidden sm:inline">TOKENS:</span>
                 <span className="text-[#00B140] tracking-widest font-bold">UNLIMITED</span>
